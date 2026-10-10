@@ -318,6 +318,8 @@ async def test_web_fetch_can_skip_jina_and_use_custom_user_agent(monkeypatch):
         status_code = 200
         url = "https://example.com/page"
         text = "<html><head><title>Test</title></head><body><p>Hello world</p></body></html>"
+        content = text.encode()
+        charset_encoding = None
         headers = {"content-type": "text/html"}
         is_redirect = False
 
@@ -366,6 +368,8 @@ async def test_web_fetch_falls_back_when_readability_dependency_is_missing(monke
         status_code = 200
         url = "https://example.com/page"
         text = "<html><head><title>Test</title></head><body><p>Hello world</p></body></html>"
+        content = text.encode()
+        charset_encoding = None
         headers = {"content-type": "text/html"}
 
         def raise_for_status(self):
@@ -599,3 +603,42 @@ async def test_web_fetch_jina_fallback_keeps_json_error_content_successful(monke
     assert data["extractor"] == "json"
     assert data["untrusted"] is True
     assert json.dumps(source, indent=2) in data["text"]
+
+
+@pytest.mark.parametrize(
+    ("head", "encoding", "content_type"),
+    [
+        ('<meta charset="gbk">', "gbk", "text/html"),
+        # A header charset or a byte-order mark wins over a conflicting <meta charset>.
+        ('<meta charset="gbk">', "utf-8", "text/html; charset=utf-8"),
+        ('<meta charset="gbk">', "utf-8-sig", "text/html"),
+        # Commented-out declarations are ignored.
+        ('<!-- <meta charset="gb2312"> --><meta charset="utf-8">', "utf-8", "text/html"),
+    ],
+    ids=["meta", "header", "bom", "comment"],
+)
+async def test_web_fetch_readability_decodes_declared_charset(
+    monkeypatch, head, encoding, content_type,
+):
+    paragraph = "这是一段用于测试字符集处理的中文正文。" * 20
+    page = (
+        f"<html><head>{head}<title>字符集测试页面</title></head>"
+        f"<body><article><p>{paragraph}</p></article></body></html>"
+    )
+    tool = WebFetchTool(config=WebFetchConfig(use_jina_reader=False))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=page.encode(encoding),
+            headers={"content-type": content_type},
+            request=request,
+        )
+
+    monkeypatch.setattr(web_module, "_pinned_dns_transport", lambda: httpx.MockTransport(handler))
+
+    result = await tool.execute(url="https://93.184.216.34/page")
+
+    data = json.loads(result)
+    assert data["extractor"] == "readability"
+    assert paragraph in data["text"]
