@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import html
 import json
 import os
@@ -95,6 +96,24 @@ def _normalize(text: str) -> str:
     """Normalize whitespace."""
     text = re.sub(r'[ \t]+', ' ', text)
     return re.sub(r'\n{3,}', '\n\n', text).strip()
+
+
+_META_CHARSET_RE = re.compile(rb'<meta[^>]+charset=["\']?([\w-]+)', re.I)
+_HTML_COMMENT_RE = re.compile(rb"<!--.*?(?:-->|\Z)", re.S)
+
+
+def _decode_html(r: httpx.Response) -> str:
+    """Decode HTML with the header charset, else its <meta charset>, else UTF-8."""
+    if r.charset_encoding or r.content.startswith(codecs.BOM_UTF8):
+        return r.text
+    # HTML requires the declaration in the first 1024 bytes; skip commented-out tags.
+    declared = _META_CHARSET_RE.search(_HTML_COMMENT_RE.sub(b"", r.content[:1024]))
+    if declared:
+        try:
+            return r.content.decode(declared[1].decode(), "replace")
+        except LookupError:  # unknown charset label
+            pass
+    return r.text
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
@@ -1288,8 +1307,9 @@ class WebFetchTool(Tool):
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
+                html_text = _decode_html(r)
                 try:
-                    text = self._extract_readable_html(r.text, extract_mode)
+                    text = self._extract_readable_html(html_text, extract_mode)
                     extractor = "readability"
                 except Exception as e:
                     logger.warning(
@@ -1297,7 +1317,7 @@ class WebFetchTool(Tool):
                         _redact_url_for_log(url),
                         type(e).__name__,
                     )
-                    text, extractor = _normalize(_strip_tags(r.text)), "html"
+                    text, extractor = _normalize(_strip_tags(html_text)), "html"
             else:
                 text, extractor = r.text, "raw"
 
