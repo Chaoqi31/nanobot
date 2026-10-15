@@ -1485,6 +1485,26 @@ def _build_kwargs_for(provider_name: str, model: str, reasoning_effort=None):
     )
 
 
+@pytest.mark.parametrize("provider, model, effort, thinking_type", [
+    ("zhipu", "glm-4.6", "none", "disabled"),
+    ("zhipu", "glm-4.7", "none", "disabled"),
+    ("zhipu", "glm-5", "none", "disabled"),
+    ("zhipu", "glm-5.1", "none", "disabled"),
+    ("zhipu", "glm-5.2", "none", "disabled"),
+    ("zhipu", "glm-5.2", "minimal", "disabled"),
+    ("zhipu", "glm-4.7", "high", "enabled"),
+    ("zhipu", "glm-4.7", None, None),
+    ("zhipu", "glm-5.3", "none", None),
+    ("zhipu", "glm-5.3-flash", "none", None),
+    ("custom", "glm-4.7", "none", None),
+])
+def test_zhipu_glm_thinking_controls(provider, model, effort, thinking_type) -> None:
+    kw = _build_kwargs_for(provider, model, reasoning_effort=effort)
+    assert kw.get("extra_body", {}).get("thinking", {}).get("type") == thinking_type
+    if effort == "none":
+        assert "reasoning_effort" not in kw
+
+
 def test_dashscope_thinking_enabled_with_reasoning_effort() -> None:
     kw = _build_kwargs_for("dashscope", "qwen3-plus", reasoning_effort="medium")
     assert kw["extra_body"] == {"enable_thinking": True}
@@ -1577,10 +1597,28 @@ def test_deepseek_thinking_enabled() -> None:
     assert kw["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
-def test_deepseek_thinking_disabled_for_minimal() -> None:
-    """reasoning_effort='minimal' must send thinking.type=disabled to DeepSeek."""
-    kw = _build_kwargs_for("deepseek", "deepseek-v4-pro", reasoning_effort="minimal")
-    assert kw["extra_body"] == {"thinking": {"type": "disabled"}}
+@pytest.mark.parametrize(
+    "effort, wire_effort, thinking_type",
+    [
+        ("minimal", "low", "enabled"),
+        ("low", "low", "enabled"),
+        ("none", None, "disabled"),
+        (None, None, None),
+    ],
+)
+def test_deepseek_reasoning_effort_controls(
+    effort: str | None, wire_effort: str | None, thinking_type: str | None,
+) -> None:
+    """DeepSeek's minimal alias enables low-effort thinking; none disables it."""
+    kw = _build_kwargs_for("deepseek", "deepseek-flash", reasoning_effort=effort)
+    if wire_effort is None:
+        assert "reasoning_effort" not in kw
+    else:
+        assert kw["reasoning_effort"] == wire_effort
+    if thinking_type is None:
+        assert "extra_body" not in kw
+    else:
+        assert kw["extra_body"] == {"thinking": {"type": thinking_type}}
 
 
 def test_deepseek_backfills_reasoning_content_on_legacy_tool_call_messages() -> None:
@@ -1623,15 +1661,14 @@ def test_backfill_does_not_touch_messages_when_thinking_explicitly_off() -> None
         {"role": "tool", "tool_call_id": "tc1", "content": "result"},
         {"role": "user", "content": "thanks"},
     ]
-    for effort in ("minimal", "none"):
-        kw = p._build_kwargs(
-            messages=list(messages), tools=None, model="deepseek-v4-pro",
-            max_tokens=1024, temperature=0.7,
-            reasoning_effort=effort, tool_choice=None,
-        )
-        for msg in kw["messages"]:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                assert "reasoning_content" not in msg
+    kw = p._build_kwargs(
+        messages=list(messages), tools=None, model="deepseek-v4-pro",
+        max_tokens=1024, temperature=0.7,
+        reasoning_effort="none", tool_choice=None,
+    )
+    for msg in kw["messages"]:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            assert "reasoning_content" not in msg
 
 
 def test_deepseek_v4_backfills_incomplete_reasoning_history_when_effort_implicit() -> None:
@@ -1704,7 +1741,7 @@ def test_deepseek_flash_backfills_missing_tool_history_reasoning(
     sent_assistant = kwargs["messages"][1]
     if history_reasoning is not None:
         assert sent_assistant["reasoning_content"] == history_reasoning
-    elif effort in ("none", "minimal"):
+    elif effort == "none":
         assert "reasoning_content" not in sent_assistant
     else:
         assert sent_assistant["reasoning_content"] == ""
@@ -1899,26 +1936,28 @@ def test_kimi_k3_uses_native_defaults() -> None:
     assert "extra_body" not in kw
 
 
-def test_kimi_k3_uses_top_level_max_reasoning_effort() -> None:
-    """K3 uses top-level reasoning_effort=max, never the K2.x thinking body."""
-    kw = _build_kwargs_for("moonshot", "kimi-k3", reasoning_effort="max")
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
+def test_kimi_k3_preserves_supported_reasoning_effort(effort: str) -> None:
+    """K3 uses top-level reasoning_effort, never the K2.x thinking body."""
+    kw = _build_kwargs_for("moonshot", "kimi-k3", reasoning_effort=effort)
 
-    assert kw["reasoning_effort"] == "max"
+    assert kw["reasoning_effort"] == effort
     assert "temperature" not in kw
     assert "extra_body" not in kw
 
 
 def test_kimi_k3_normalizes_legacy_enabled_reasoning_effort() -> None:
     """Switching a K2.x preset to K3 must not send unsupported effort values."""
-    kw = _build_kwargs_for("moonshot", "kimi-k3", reasoning_effort="high")
+    kw = _build_kwargs_for("moonshot", "kimi-k3", reasoning_effort="medium")
 
     assert kw["reasoning_effort"] == "max"
     assert "extra_body" not in kw
 
 
-def test_kimi_k3_omits_disabled_reasoning_effort() -> None:
+@pytest.mark.parametrize("effort", ["none", "minimal"])
+def test_kimi_k3_omits_disabled_reasoning_effort(effort: str) -> None:
     """K3 cannot disable reasoning, so disabled effort falls back to its default."""
-    kw = _build_kwargs_for("moonshot", "kimi-k3", reasoning_effort="none")
+    kw = _build_kwargs_for("moonshot", "kimi-k3", reasoning_effort=effort)
 
     assert "reasoning_effort" not in kw
     assert "temperature" not in kw
